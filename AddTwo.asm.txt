@@ -3,9 +3,7 @@ INCLUDE Irvine32.inc
 ; ============================================================
 ;  TIENDA DE CUBOS DE RUBIK - Sistema de inventario (MASM x86, Irvine32)
 ;  Version de la Unidad 3: Refactorizacion con Procedimientos, Macros y USES.
-;  Los importes se guardan en centavos enteros (185.50 -> 18550).
 ;  Regla del negocio: 10% de descuento si se compran 5 o mas
-;  unidades del mismo producto en una venta (fraccion de centavo descartada).
 ; ============================================================
 
 ; ============================================================
