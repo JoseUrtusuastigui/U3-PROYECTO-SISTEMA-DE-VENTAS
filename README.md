@@ -87,5 +87,5 @@ Esta reducción se logro gracias a la eliminación de 4 bloques principales.
 4.Operaciones secuenciales de archivos y copia de arreglos: En GuardarCatalogo y CargarCatalogo se repetían bloques de 5 líneas por cada arreglo escrito o leído en disco, además de 4 bloques de copia de memoria al restaurar los arreglos temporales. Con las macros mEscribirArchivo, mLeerArchivo y mCopiarArreglo, esas 66 líneas se compactaron en 14 llamadas directas y legibles.
 
 
-Tabla de pruebas actualizada: Los obtenidos fueron idénticos a los obtenidos en la versión del código de la unidad 2
+Tabla de pruebas actualizada: Los resultados obtenidos fueron idénticos a los obtenidos en la versión del código de la unidad 2
 
