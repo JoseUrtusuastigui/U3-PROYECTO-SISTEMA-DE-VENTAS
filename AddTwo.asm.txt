@@ -1,0 +1,1388 @@
+INCLUDE Irvine32.inc
+
+; ============================================================
+;  TIENDA DE CUBOS DE RUBIK - Sistema de inventario (MASM x86, Irvine32)
+;  Version de la Unidad 3: Refactorizacion con Procedimientos, Macros y USES.
+;  Los importes se guardan en centavos enteros (185.50 -> 18550).
+;  Regla del negocio: 10% de descuento si se compran 5 o mas
+;  unidades del mismo producto en una venta (fraccion de centavo descartada).
+; ============================================================
+
+; ============================================================
+;  MACROS
+; ============================================================
+
+; ------------------------------------------------------------
+; mEscribir
+; Imprime una cadena en consola sin salto de linea
+; ------------------------------------------------------------
+mEscribir MACRO texto
+    mov edx, OFFSET texto
+    call WriteString
+ENDM
+
+; ------------------------------------------------------------
+; mEscribirLinea
+; Imprime una cadena seguida de un salto de linea
+; ------------------------------------------------------------
+mEscribirLinea MACRO texto
+    mov edx, OFFSET texto
+    call EscribirLinea
+ENDM
+
+; ------------------------------------------------------------
+; mVerificarRango
+; Verifica si valor esta dentro de [minimo, maximo] sin signo.
+; Usa etiquetas LOCAL para evitar colisiones al expandirse.
+; ------------------------------------------------------------
+mVerificarRango MACRO valor, minimo, maximo, etqError
+    LOCAL vrMinOk, vrFin
+    cmp valor, minimo
+    jae vrMinOk
+    jmp etqError
+vrMinOk:
+    cmp valor, maximo
+    jbe vrFin
+    jmp etqError
+vrFin:
+ENDM
+
+; ------------------------------------------------------------
+; mEscribirArchivo
+; Escribe un bloque al archivo abierto y salta si ocurre error
+; ------------------------------------------------------------
+mEscribirArchivo MACRO buffer, tamano, etqError
+    mov edx, OFFSET buffer
+    mov ecx, tamano
+    call EscribirBloque
+    cmp ebx, 0
+    je etqError
+ENDM
+
+; ------------------------------------------------------------
+; mLeerArchivo
+; Lee un bloque del archivo abierto y salta si ocurre error
+; ------------------------------------------------------------
+mLeerArchivo MACRO buffer, tamano, etqError
+    mov edx, OFFSET buffer
+    mov ecx, tamano
+    call LeerBloque
+    cmp ebx, 0
+    je etqError
+ENDM
+
+; ------------------------------------------------------------
+; mCopiarArreglo
+; Copia un bloque de memoria de origen a destino
+; ------------------------------------------------------------
+mCopiarArreglo MACRO origen, destino, tamano
+    mov esi, OFFSET origen
+    mov edi, OFFSET destino
+    mov ecx, tamano
+    call CopiarBloque
+ENDM
+
+; ---------------- Constantes ----------------
+MAX_PRODUCTOS        = 10
+TAM_CODIGO           = 8          ; 7 caracteres + terminador
+MAX_LONG_NOMBRE      = 25
+TAM_NOMBRE           = 26         ; 25 caracteres + terminador
+PRECIO_MIN           = 1          ; $0.01
+PRECIO_MAX           = 999999     ; $9999.99
+EXISTENCIA_MAX       = 100
+CANTIDAD_DESCUENTO   = 5
+PORCENTAJE_DESCUENTO = 10
+BYTES_CODIGOS        = MAX_PRODUCTOS * TAM_CODIGO
+BYTES_NOMBRES        = MAX_PRODUCTOS * TAM_NOMBRE
+BYTES_ENTEROS        = MAX_PRODUCTOS * 4
+
+.data
+; ---------------- Catalogo en memoria ----------------
+cantidadProductos DWORD 0
+codigos           BYTE BYTES_CODIGOS DUP(0)
+nombres           BYTE BYTES_NOMBRES DUP(0)
+precios           DWORD MAX_PRODUCTOS DUP(0)      ; centavos
+existencias       DWORD MAX_PRODUCTOS DUP(0)
+
+; ---------------- Catalogo temporal (para cargar sin perder datos) ----------------
+tmpCantidad       DWORD 0
+tmpCodigos        BYTE BYTES_CODIGOS DUP(0)
+tmpNombres        BYTE BYTES_NOMBRES DUP(0)
+tmpPrecios        DWORD MAX_PRODUCTOS DUP(0)
+tmpExistencias    DWORD MAX_PRODUCTOS DUP(0)
+
+; ---------------- Estado de la sesion ----------------
+ingresosSesion    DWORD 0
+sinGuardar        DWORD 0
+archivoHandle     DWORD ?
+bytesPedidos      DWORD 0
+indiceActual      DWORD 0
+cantidadActual    DWORD 0
+valorTotal        DWORD 0
+
+; ---------------- Datos de captura ----------------
+entrada           BYTE 81 DUP(0)
+bufferNumero      BYTE 16 DUP(0)
+codigoNuevo       BYTE TAM_CODIGO DUP(0)
+nombreNuevo       BYTE TAM_NOMBRE DUP(0)
+precioNuevo       DWORD 0
+existenciaNueva   DWORD 0
+
+nombreArchivo     BYTE "Catalogo_Cubos.dat", 0
+
+; ---------------- Textos ----------------
+txtPeso           BYTE "$", 0
+txtPunto          BYTE ".", 0
+txtCero           BYTE "0", 0
+txtMXN            BYTE " MXN", 0
+txtSep            BYTE " | ", 0
+txtSepPrecio      BYTE " | Precio: ", 0
+txtSepExist       BYTE " | Existencia: ", 0
+txtBase           BYTE "Importe base: ", 0
+txtDescuento      BYTE "Descuento por cantidad (10%): -", 0
+txtSinDescuento   BYTE "Descuento por cantidad: ninguno", 0
+txtTotal          BYTE "Total a pagar: ", 0
+
+msgTitulo         BYTE "===== TIENDA DE CUBOS DE RUBIK =====", 0
+msgMenu1          BYTE "1. Registrar producto", 0
+msgMenu2          BYTE "2. Mostrar inventario", 0
+msgMenu3          BYTE "3. Buscar producto por codigo", 0
+msgMenu4          BYTE "4. Recibir mercancia", 0
+msgMenu5          BYTE "5. Vender", 0
+msgMenu6          BYTE "6. Mostrar resumen", 0
+msgMenu7          BYTE "7. Guardar catalogo", 0
+msgMenu8          BYTE "8. Cargar catalogo", 0
+msgMenu9          BYTE "9. Simular descuento por cantidad", 0
+msgMenu0          BYTE "0. Salir", 0
+msgRegla          BYTE "Regla: 10% de descuento al comprar 5 o mas unidades de un producto", 0
+msgOpcion         BYTE "Seleccione una opcion: ", 0
+msgOpcionInvalida BYTE "Opcion no valida", 0
+
+msgPedirCodigo     BYTE "Codigo (formato ABC-123): ", 0
+msgPedirNombre     BYTE "Nombre (1 a 25 caracteres): ", 0
+msgPedirPrecio     BYTE "Precio en MXN (ej. 185.50): ", 0
+msgPedirExistencia BYTE "Existencia inicial (0 a 100): ", 0
+msgPedirCantEntrada BYTE "Unidades recibidas: ", 0
+msgPedirCantVenta  BYTE "Unidades a vender: ", 0
+msgPedirCantSim    BYTE "Unidades a simular: ", 0
+
+msgVacio           BYTE "Error: el dato no puede estar vacio", 0
+msgSoloDigitos     BYTE "Error: solo se permiten digitos (maximo 9)", 0
+msgCodigoFormato   BYTE "Error: codigo incorrecto, use 3 letras mayusculas, guion y 3 digitos", 0
+msgNombreLargo     BYTE "Error: el nombre excede 25 caracteres", 0
+msgPrecioFormato   BYTE "Error: precio invalido, use pesos enteros o punto con 1 o 2 decimales", 0
+msgPrecioRango     BYTE "Error: el precio debe estar entre $0.01 y $9999.99 MXN", 0
+msgExistenciaRango BYTE "Error: la existencia debe estar entre 0 y 100", 0
+msgCapacidad       BYTE "Error: el catalogo ya tiene 10 productos", 0
+msgDuplicado       BYTE "Error: ese codigo ya esta registrado", 0
+msgNoExiste        BYTE "Error: no existe un producto con ese codigo", 0
+msgCantidadCero    BYTE "Error: la cantidad debe ser mayor que cero", 0
+msgExcede100       BYTE "Error: la existencia no puede exceder 100 unidades", 0
+msgSinExistencias  BYTE "Error: no hay existencias suficientes", 0
+msgDesborde        BYTE "Error: la operacion produce un desbordamiento", 0
+msgRegistrado      BYTE "Producto registrado correctamente", 0
+msgRecibido        BYTE "Mercancia recibida correctamente", 0
+msgVentaOk         BYTE "Venta realizada correctamente", 0
+msgInvVacio        BYTE "No hay productos registrados", 0
+
+msgResumenTitulo   BYTE "----- RESUMEN -----", 0
+msgResProductos    BYTE "Productos registrados: ", 0
+msgResUnidades     BYTE "Unidades disponibles: ", 0
+msgResValor        BYTE "Valor total del inventario: ", 0
+msgResIngresos     BYTE "Ingresos de la sesion: ", 0
+
+msgGuardadoOk      BYTE "Catalogo guardado en Catalogo_Cubos.dat", 0
+msgGuardadoError   BYTE "Error: no se pudo guardar el catalogo", 0
+msgCargadoOk       BYTE "Catalogo cargado correctamente", 0
+msgCargaNoArchivo  BYTE "Error: no se pudo abrir Catalogo_Cubos.dat", 0
+msgCargaLectura    BYTE "Error: el archivo esta incompleto o no se pudo leer", 0
+msgCargaInvalida   BYTE "Error: el archivo contiene datos invalidos, se conserva el catalogo actual", 0
+msgConfCargar      BYTE "Hay cambios sin guardar que se perderan. Cargar de todos modos? (S/N): ", 0
+msgConfSalir       BYTE "Hay cambios sin guardar. Salir de todos modos? (S/N): ", 0
+msgAdios           BYTE "Hasta luego", 0
+
+.code
+main PROC
+
+menuPrincipal:
+    call MostrarMenu
+    mov edx, OFFSET msgOpcion
+    call PedirNumero
+    cmp ebx, 1
+    jne menuPrincipal
+
+    cmp eax, 1
+    je opRegistrar
+    cmp eax, 2
+    je opInventario
+    cmp eax, 3
+    je opBuscar
+    cmp eax, 4
+    je opRecibir
+    cmp eax, 5
+    je opVender
+    cmp eax, 6
+    je opResumen
+    cmp eax, 7
+    je opGuardar
+    cmp eax, 8
+    je opCargar
+    cmp eax, 9
+    je opSimular
+    cmp eax, 0
+    je opSalir
+    mEscribirLinea msgOpcionInvalida
+    jmp menuPrincipal
+
+opRegistrar:
+    call RegistrarProducto
+    jmp menuPrincipal
+opInventario:
+    call MostrarInventario
+    jmp menuPrincipal
+opBuscar:
+    call BuscarProducto
+    jmp menuPrincipal
+opRecibir:
+    call RecibirMercancia
+    jmp menuPrincipal
+opVender:
+    call VenderProducto
+    jmp menuPrincipal
+opResumen:
+    call MostrarResumen
+    jmp menuPrincipal
+opGuardar:
+    call GuardarCatalogo
+    jmp menuPrincipal
+opCargar:
+    call CargarCatalogo
+    jmp menuPrincipal
+opSimular:
+    call SimularDescuento
+    jmp menuPrincipal
+
+opSalir:
+    cmp sinGuardar, 0
+    je salirPrograma
+    mov edx, OFFSET msgConfSalir
+    call Confirmar
+    cmp eax, 1
+    jne menuPrincipal
+
+salirPrograma:
+    mEscribirLinea msgAdios
+    exit
+
+main ENDP
+
+; ============================================================
+;  UTILIDADES DE ENTRADA / SALIDA
+; ============================================================
+
+; ------------------------------------------------------------
+; EscribirLinea
+; Entradas : EDX = direccion de la cadena
+; Salidas  : escribe la cadena y un salto de linea
+; Modifica : ninguno
+; ------------------------------------------------------------
+EscribirLinea PROC
+    call WriteString
+    call Crlf
+    ret
+EscribirLinea ENDP
+
+; ------------------------------------------------------------
+; LeerEntrada
+; Entradas : ninguna
+; Salidas  : EAX = longitud capturada; el texto queda en 'entrada'
+; Modifica : EAX
+; Conserva : ECX, EDX (con USES)
+; ------------------------------------------------------------
+LeerEntrada PROC USES ecx edx
+    mov edx, OFFSET entrada
+    mov ecx, SIZEOF entrada - 1
+    call ReadString
+    ret
+LeerEntrada ENDP
+
+; ------------------------------------------------------------
+; MostrarNumero
+; Entradas : EAX = numero sin signo
+; Salidas  : escribe el numero en decimal con WriteString
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, EDI (con USES)
+; ------------------------------------------------------------
+MostrarNumero PROC USES eax ebx ecx edx edi
+    mov ebx, 10
+    mov ecx, 0
+mnDividir:
+    mov edx, 0
+    div ebx
+    add dl, "0"
+    push edx
+    inc ecx
+    cmp eax, 0
+    jne mnDividir
+    mov edi, OFFSET bufferNumero
+mnGuardar:
+    pop eax
+    mov [edi], al
+    inc edi
+    loop mnGuardar
+    mov BYTE PTR [edi], 0
+    mEscribir bufferNumero
+    ret
+MostrarNumero ENDP
+
+; ------------------------------------------------------------
+; MostrarImporte
+; Entradas : EAX = importe en centavos
+; Salidas  : escribe "$pesos.cc MXN"
+; Modifica : ninguno
+; Conserva : EAX, EBX, EDX (con USES)
+; ------------------------------------------------------------
+MostrarImporte PROC USES eax ebx edx
+    mEscribir txtPeso
+    mov ebx, 100
+    mov edx, 0
+    div ebx                     ; EAX = pesos, EDX = centavos
+    call MostrarNumero
+    mov ebx, edx                ; EBX = centavos
+    mEscribir txtPunto
+    cmp ebx, 10
+    jae miDosDigitos
+    mEscribir txtCero
+miDosDigitos:
+    mov eax, ebx
+    call MostrarNumero
+    mEscribir txtMXN
+    ret
+MostrarImporte ENDP
+
+; ------------------------------------------------------------
+; Confirmar
+; Entradas : EDX = mensaje a mostrar
+; Salidas  : EAX = 1 si el usuario escribio S o s, 0 en otro caso
+; Modifica : EAX
+; Conserva : ECX, EDX (con USES)
+; ------------------------------------------------------------
+Confirmar PROC USES ecx edx
+    call WriteString
+    call LeerEntrada
+    cmp eax, 1
+    jne confNo
+    mov al, entrada
+    cmp al, "S"
+    je confSi
+    cmp al, "s"
+    je confSi
+confNo:
+    mov eax, 0
+    jmp confFin
+confSi:
+    mov eax, 1
+confFin:
+    ret
+Confirmar ENDP
+
+; ============================================================
+;  CONVERSIONES Y VALIDACIONES
+; ============================================================
+
+; ------------------------------------------------------------
+; ConvertirEntero
+; Entradas : ESI = cadena terminada en cero
+; Salidas  : EAX = valor; EBX = 1 si es valido, 0 si esta vacia,
+;            tiene caracteres no numericos o mas de 9 digitos
+; Modifica : EAX, EBX
+; Conserva : ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+ConvertirEntero PROC USES ecx edx esi
+    mov eax, 0
+    mov ecx, 0
+ceDigito:
+    mov dl, [esi]
+    cmp dl, 0
+    je ceFinDigitos
+    mVerificarRango dl, "0", "9", ceInvalido
+    inc ecx
+    cmp ecx, 9
+    ja ceInvalido
+    sub dl, "0"
+    movzx edx, dl
+    imul eax, eax, 10
+    add eax, edx
+    inc esi
+    jmp ceDigito
+ceFinDigitos:
+    cmp ecx, 0
+    je ceInvalido
+    mov ebx, 1
+    jmp ceSalir
+ceInvalido:
+    mov eax, 0
+    mov ebx, 0
+ceSalir:
+    ret
+ConvertirEntero ENDP
+
+; ------------------------------------------------------------
+; ConvertirPrecio
+; Entradas : ESI = cadena terminada en cero (pesos enteros o con
+;            punto y 1 o 2 decimales)
+; Salidas  : EAX = centavos; EBX = 1 valido, 0 formato incorrecto,
+;            2 fuera de rango
+; Modifica : EAX, EBX
+; Conserva : ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+ConvertirPrecio PROC USES ecx edx esi
+    mov eax, 0                  ; pesos
+    mov ecx, 0                  ; digitos enteros
+cpEntero:
+    mov dl, [esi]
+    cmp dl, 0
+    je cpTerminaEntero
+    cmp dl, "."
+    je cpPunto
+    mVerificarRango dl, "0", "9", cpFormato
+    inc ecx
+    sub dl, "0"
+    movzx edx, dl
+    imul eax, eax, 10
+    add eax, edx
+    cmp eax, 9999
+    jbe cpSigue
+    mov eax, 10000              ; se satura para evitar desbordamiento
+cpSigue:
+    inc esi
+    jmp cpEntero
+
+cpPunto:
+    cmp ecx, 0
+    je cpFormato                ; falta la parte entera
+    inc esi
+    mov ebx, 0                  ; centavos
+    mov ecx, 0                  ; digitos decimales
+cpDecimal:
+    mov dl, [esi]
+    cmp dl, 0
+    je cpFinDecimal
+    mVerificarRango dl, "0", "9", cpFormato
+    inc ecx
+    cmp ecx, 2
+    ja cpFormato
+    sub dl, "0"
+    movzx edx, dl
+    imul ebx, ebx, 10
+    add ebx, edx
+    inc esi
+    jmp cpDecimal
+cpFinDecimal:
+    cmp ecx, 0
+    je cpFormato                ; punto sin decimales
+    cmp ecx, 1
+    jne cpCalcular
+    imul ebx, ebx, 10           ; un decimal: 5 -> 50 centavos
+    jmp cpCalcular
+
+cpTerminaEntero:
+    cmp ecx, 0
+    je cpFormato                ; cadena vacia
+    mov ebx, 0
+
+cpCalcular:
+    cmp eax, 9999
+    ja cpRango
+    imul eax, eax, 100
+    add eax, ebx
+    mVerificarRango eax, PRECIO_MIN, PRECIO_MAX, cpRango
+    mov ebx, 1
+    jmp cpSalir
+cpRango:
+    mov eax, 0
+    mov ebx, 2
+    jmp cpSalir
+cpFormato:
+    mov eax, 0
+    mov ebx, 0
+cpSalir:
+    ret
+ConvertirPrecio ENDP
+
+; ------------------------------------------------------------
+; ValidarFormatoCodigo
+; Entradas : ESI = cadena terminada en cero
+; Salidas  : EAX = 1 si cumple ABC-123, 0 en otro caso
+; Modifica : EAX
+; Conserva : ECX, ESI (con USES)
+; ------------------------------------------------------------
+ValidarFormatoCodigo PROC USES ecx esi
+    mov ecx, 3
+vfLetras:
+    mov al, [esi]
+    mVerificarRango al, "A", "Z", vfInvalido
+    inc esi
+    loop vfLetras
+    mov al, [esi]
+    cmp al, "-"
+    jne vfInvalido
+    inc esi
+    mov ecx, 3
+vfDigitos:
+    mov al, [esi]
+    mVerificarRango al, "0", "9", vfInvalido
+    inc esi
+    loop vfDigitos
+    cmp BYTE PTR [esi], 0
+    jne vfInvalido
+    mov eax, 1
+    jmp vfSalir
+vfInvalido:
+    mov eax, 0
+vfSalir:
+    ret
+ValidarFormatoCodigo ENDP
+
+; ------------------------------------------------------------
+; CopiarCadena
+; Entradas : ESI = origen, EDI = destino (incluye el terminador)
+; Salidas  : cadena copiada
+; Modifica : ninguno
+; Conserva : EAX, ESI, EDI (con USES)
+; ------------------------------------------------------------
+CopiarCadena PROC USES eax esi edi
+ccCaracter:
+    mov al, [esi]
+    mov [edi], al
+    inc esi
+    inc edi
+    cmp al, 0
+    jne ccCaracter
+    ret
+CopiarCadena ENDP
+
+; ------------------------------------------------------------
+; CopiarBloque
+; Entradas : ESI = origen, EDI = destino, ECX = bytes (> 0)
+; Salidas  : bloque copiado
+; Modifica : ninguno
+; Conserva : EAX, ECX, ESI, EDI (con USES)
+; ------------------------------------------------------------
+CopiarBloque PROC USES eax ecx esi edi
+cbByte:
+    mov al, [esi]
+    mov [edi], al
+    inc esi
+    inc edi
+    loop cbByte
+    ret
+CopiarBloque ENDP
+
+; ------------------------------------------------------------
+; CompararCadenas
+; Entradas : ESI y EDI = cadenas terminadas en cero
+; Salidas  : EAX = 1 si son iguales, 0 si son distintas
+; Modifica : EAX
+; Conserva : EDX, ESI, EDI (con USES)
+; ------------------------------------------------------------
+CompararCadenas PROC USES edx esi edi
+cmpCaracter:
+    mov al, [esi]
+    mov dl, [edi]
+    cmp al, dl
+    jne cmpDistintas
+    cmp al, 0
+    je cmpIguales
+    inc esi
+    inc edi
+    jmp cmpCaracter
+cmpIguales:
+    mov eax, 1
+    jmp cmpSalir
+cmpDistintas:
+    mov eax, 0
+cmpSalir:
+    ret
+CompararCadenas ENDP
+
+; ------------------------------------------------------------
+; BuscarCodigo
+; Entradas : EDI = codigo a buscar (cadena terminada en cero)
+; Salidas  : EAX = indice del producto, o -1 si no existe
+; Modifica : EAX
+; Conserva : EBX, ESI (con USES)
+; ------------------------------------------------------------
+BuscarCodigo PROC USES ebx esi
+    mov esi, OFFSET codigos
+    mov ebx, 0
+bcSiguiente:
+    cmp ebx, cantidadProductos
+    jae bcNoEncontrado
+    call CompararCadenas
+    cmp eax, 1
+    je bcEncontrado
+    add esi, TAM_CODIGO
+    inc ebx
+    jmp bcSiguiente
+bcEncontrado:
+    mov eax, ebx
+    jmp bcSalir
+bcNoEncontrado:
+    mov eax, -1
+bcSalir:
+    ret
+BuscarCodigo ENDP
+
+; ------------------------------------------------------------
+; CalcularVenta  (aplica la regla de descuento por cantidad)
+; Entradas : EAX = precio en centavos, EBX = cantidad
+; Salidas  : EAX = importe base, EBX = descuento, ECX = importe final,
+;            EDX = 0 correcto, 1 si hubo desbordamiento
+; Modifica : EAX, EBX, ECX, EDX
+; ------------------------------------------------------------
+CalcularVenta PROC
+    mul ebx                     ; EDX:EAX = precio * cantidad
+    cmp edx, 0
+    jne cvDesborda
+    mov ecx, eax                ; ECX = base
+    cmp ebx, CANTIDAD_DESCUENTO
+    jb cvSinDescuento
+    mov eax, ecx
+    mov ebx, PORCENTAJE_DESCUENTO
+    mul ebx                     ; base * 10 (64 bits, sin desbordar)
+    mov ebx, 100
+    div ebx                     ; EAX = descuento, fraccion descartada
+    mov ebx, eax                ; EBX = descuento
+    mov eax, ecx                ; EAX = base
+    sub ecx, ebx                ; ECX = final
+    mov edx, 0
+    jmp cvSalir
+cvSinDescuento:
+    mov eax, ecx
+    mov ebx, 0
+    mov edx, 0
+    jmp cvSalir
+cvDesborda:
+    mov edx, 1
+cvSalir:
+    ret
+CalcularVenta ENDP
+
+; ============================================================
+;  CAPTURA DE DATOS (cada una muestra sus propios errores)
+; ============================================================
+
+; ------------------------------------------------------------
+; PedirNumero
+; Entradas : EDX = mensaje a mostrar
+; Salidas  : EAX = valor entero; EBX = 1 valido, 0 error
+; Modifica : EAX, EBX
+; Conserva : ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+PedirNumero PROC USES ecx edx esi
+    call WriteString
+    call LeerEntrada
+    cmp eax, 0
+    je pnVacio
+    mov esi, OFFSET entrada
+    call ConvertirEntero
+    cmp ebx, 1
+    je pnSalir
+    mEscribirLinea msgSoloDigitos
+    jmp pnSalir
+pnVacio:
+    mEscribirLinea msgVacio
+    mov eax, 0
+    mov ebx, 0
+pnSalir:
+    ret
+PedirNumero ENDP
+
+; ------------------------------------------------------------
+; PedirPrecio
+; Entradas : EDX = mensaje a mostrar
+; Salidas  : EAX = centavos; EBX = 1 valido, 0 error
+; Modifica : EAX, EBX
+; Conserva : ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+PedirPrecio PROC USES ecx edx esi
+    call WriteString
+    call LeerEntrada
+    cmp eax, 0
+    je ppVacio
+    mov esi, OFFSET entrada
+    call ConvertirPrecio
+    cmp ebx, 1
+    je ppSalir
+    cmp ebx, 2
+    je ppRango
+    mov edx, OFFSET msgPrecioFormato
+    jmp ppError
+ppRango:
+    mov edx, OFFSET msgPrecioRango
+    jmp ppError
+ppVacio:
+    mov edx, OFFSET msgVacio
+ppError:
+    call EscribirLinea
+    mov eax, 0
+    mov ebx, 0
+ppSalir:
+    ret
+PedirPrecio ENDP
+
+; ------------------------------------------------------------
+; PedirCodigo
+; Entradas : ninguna
+; Salidas  : EBX = 1 si el codigo es valido (queda en 'entrada'), 0 error
+; Modifica : EAX, EBX
+; Conserva : EDX, ESI (con USES)
+; ------------------------------------------------------------
+PedirCodigo PROC USES edx esi
+    mEscribir msgPedirCodigo
+    call LeerEntrada
+    cmp eax, 0
+    je pcVacio
+    mov esi, OFFSET entrada
+    call ValidarFormatoCodigo
+    cmp eax, 1
+    je pcValido
+    mov edx, OFFSET msgCodigoFormato
+    jmp pcError
+pcVacio:
+    mov edx, OFFSET msgVacio
+pcError:
+    call EscribirLinea
+    mov ebx, 0
+    jmp pcSalir
+pcValido:
+    mov ebx, 1
+pcSalir:
+    ret
+PedirCodigo ENDP
+
+; ------------------------------------------------------------
+; PedirNombre
+; Entradas : ninguna
+; Salidas  : EBX = 1 si el nombre tiene de 1 a 25 caracteres
+;            (queda en 'entrada'), 0 error
+; Modifica : EAX, EBX
+; Conserva : EDX (con USES)
+; ------------------------------------------------------------
+PedirNombre PROC USES edx
+    mEscribir msgPedirNombre
+    call LeerEntrada
+    cmp eax, 0
+    je pnomVacio
+    cmp eax, MAX_LONG_NOMBRE
+    ja pnomLargo
+    mov ebx, 1
+    jmp pnomSalir
+pnomVacio:
+    mov edx, OFFSET msgVacio
+    jmp pnomError
+pnomLargo:
+    mov edx, OFFSET msgNombreLargo
+pnomError:
+    call EscribirLinea
+    mov ebx, 0
+pnomSalir:
+    ret
+PedirNombre ENDP
+
+; ------------------------------------------------------------
+; CapturarYBuscarProducto  (NUEVO PROCEDIMIENTO UNIDAD 3)
+; Captura un codigo por teclado, valida su formato y lo busca
+; en el catalogo, mostrando el mensaje de error correspondiente.
+; Entradas : ninguna
+; Salidas  : EAX = indice del producto (0..9), o -1 si el formato
+;            es invalido o el producto no existe
+; Modifica : EAX
+; Conserva : EBX, EDX, EDI (con USES)
+; ------------------------------------------------------------
+CapturarYBuscarProducto PROC USES ebx edx edi
+    call PedirCodigo
+    cmp ebx, 1
+    jne cybNoValido
+    mov edi, OFFSET entrada
+    call BuscarCodigo
+    cmp eax, -1
+    jne cybSalir
+    mEscribirLinea msgNoExiste
+    jmp cybSalir
+cybNoValido:
+    mov eax, -1
+cybSalir:
+    ret
+CapturarYBuscarProducto ENDP
+
+; ------------------------------------------------------------
+; PedirCantidadPositiva  (NUEVO PROCEDIMIENTO UNIDAD 3)
+; Solicita un numero entero y valida que sea mayor que cero.
+; Entradas : EDX = direccion del mensaje a mostrar
+; Salidas  : EAX = cantidad (> 0); EBX = 1 si es valida, 0 si hubo error
+; Modifica : EAX, EBX
+; Conserva : EDX (con USES)
+; ------------------------------------------------------------
+PedirCantidadPositiva PROC USES edx
+    call PedirNumero
+    cmp ebx, 1
+    jne pcpSalir
+    cmp eax, 0
+    jne pcpSalir
+    mEscribirLinea msgCantidadCero
+    mov ebx, 0
+pcpSalir:
+    ret
+PedirCantidadPositiva ENDP
+
+; ============================================================
+;  FUNCIONES DEL MENU
+; ============================================================
+
+; ------------------------------------------------------------
+; MostrarMenu
+; Entradas/Salidas : ninguna (imprime el menu)
+; Modifica : ninguno
+; Conserva : EDX (con USES)
+; ------------------------------------------------------------
+MostrarMenu PROC USES edx
+    call Crlf
+    mEscribirLinea msgTitulo
+    mEscribirLinea msgMenu1
+    mEscribirLinea msgMenu2
+    mEscribirLinea msgMenu3
+    mEscribirLinea msgMenu4
+    mEscribirLinea msgMenu5
+    mEscribirLinea msgMenu6
+    mEscribirLinea msgMenu7
+    mEscribirLinea msgMenu8
+    mEscribirLinea msgMenu9
+    mEscribirLinea msgMenu0
+    mEscribirLinea msgRegla
+    ret
+MostrarMenu ENDP
+
+; ------------------------------------------------------------
+; MostrarProducto
+; Entradas : EAX = indice del producto
+; Salidas  : imprime codigo, nombre, precio y existencia
+; Modifica : ninguno
+; Conserva : EAX, EBX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+MostrarProducto PROC USES eax ebx edx esi
+    mov ebx, eax
+    imul esi, ebx, TAM_CODIGO
+    add esi, OFFSET codigos
+    mov edx, esi
+    call WriteString
+    mEscribir txtSep
+    imul esi, ebx, TAM_NOMBRE
+    add esi, OFFSET nombres
+    mov edx, esi
+    call WriteString
+    mEscribir txtSepPrecio
+    mov esi, ebx
+    shl esi, 2
+    mov eax, precios[esi]
+    call MostrarImporte
+    mEscribir txtSepExist
+    mov eax, existencias[esi]
+    call MostrarNumero
+    call Crlf
+    ret
+MostrarProducto ENDP
+
+; ------------------------------------------------------------
+; MostrarDesglose
+; Entradas : EAX = importe base, EBX = descuento, ECX = importe final
+; Salidas  : imprime el desglose de la venta
+; Modifica : ninguno
+; Conserva : EAX, EDX (con USES)
+; ------------------------------------------------------------
+MostrarDesglose PROC USES eax edx
+    mEscribir txtBase
+    call MostrarImporte
+    call Crlf
+    cmp ebx, 0
+    jne mdConDescuento
+    mEscribirLinea txtSinDescuento
+    jmp mdTotal
+mdConDescuento:
+    mEscribir txtDescuento
+    mov eax, ebx
+    call MostrarImporte
+    call Crlf
+mdTotal:
+    mEscribir txtTotal
+    mov eax, ecx
+    call MostrarImporte
+    call Crlf
+    ret
+MostrarDesglose ENDP
+
+; ------------------------------------------------------------
+; RegistrarProducto  (opcion 1)
+; Entradas : ninguna (captura por teclado)
+; Salidas  : agrega un producto si todo es valido; si algo se
+;            rechaza no cambia el catalogo
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, ESI, EDI (con USES)
+; ------------------------------------------------------------
+RegistrarProducto PROC USES eax ebx ecx edx esi edi
+    cmp cantidadProductos, MAX_PRODUCTOS
+    jb rpPedirCodigo
+    mEscribirLinea msgCapacidad
+    jmp rpFin
+rpPedirCodigo:
+    call PedirCodigo
+    cmp ebx, 1
+    jne rpFin
+    mov edi, OFFSET entrada
+    call BuscarCodigo
+    cmp eax, -1
+    je rpCodigoLibre
+    mEscribirLinea msgDuplicado
+    jmp rpFin
+rpCodigoLibre:
+    mov esi, OFFSET entrada
+    mov edi, OFFSET codigoNuevo
+    call CopiarCadena
+    call PedirNombre
+    cmp ebx, 1
+    jne rpFin
+    mov esi, OFFSET entrada
+    mov edi, OFFSET nombreNuevo
+    call CopiarCadena
+    mov edx, OFFSET msgPedirPrecio
+    call PedirPrecio
+    cmp ebx, 1
+    jne rpFin
+    mov precioNuevo, eax
+    mov edx, OFFSET msgPedirExistencia
+    call PedirNumero
+    cmp ebx, 1
+    jne rpFin
+    cmp eax, EXISTENCIA_MAX
+    jbe rpGuardar
+    mEscribirLinea msgExistenciaRango
+    jmp rpFin
+rpGuardar:
+    mov existenciaNueva, eax
+    mov ebx, cantidadProductos
+    imul edi, ebx, TAM_CODIGO
+    add edi, OFFSET codigos
+    mov esi, OFFSET codigoNuevo
+    call CopiarCadena
+    imul edi, ebx, TAM_NOMBRE
+    add edi, OFFSET nombres
+    mov esi, OFFSET nombreNuevo
+    call CopiarCadena
+    mov esi, ebx
+    shl esi, 2
+    mov eax, precioNuevo
+    mov precios[esi], eax
+    mov eax, existenciaNueva
+    mov existencias[esi], eax
+    inc cantidadProductos
+    mov sinGuardar, 1
+    mEscribirLinea msgRegistrado
+rpFin:
+    ret
+RegistrarProducto ENDP
+
+; ------------------------------------------------------------
+; MostrarInventario  (opcion 2)
+; Entradas/Salidas : imprime todos los productos
+; Modifica : ninguno
+; Conserva : EAX, EBX, EDX (con USES)
+; ------------------------------------------------------------
+MostrarInventario PROC USES eax ebx edx
+    cmp cantidadProductos, 0
+    jne miHay
+    mEscribirLinea msgInvVacio
+    jmp miFin
+miHay:
+    mov ebx, 0
+miBucle:
+    mov eax, ebx
+    call MostrarProducto
+    inc ebx
+    cmp ebx, cantidadProductos
+    jb miBucle
+miFin:
+    ret
+MostrarInventario ENDP
+
+; ------------------------------------------------------------
+; BuscarProducto  (opcion 3)
+; Entradas : ninguna (captura el codigo)
+; Salidas  : imprime el producto si existe
+; Modifica : ninguno
+; Conserva : EAX (con USES)
+; ------------------------------------------------------------
+BuscarProducto PROC USES eax
+    call CapturarYBuscarProducto
+    cmp eax, -1
+    je bpFin
+    call MostrarProducto
+bpFin:
+    ret
+BuscarProducto ENDP
+
+; ------------------------------------------------------------
+; RecibirMercancia  (opcion 4)
+; Entradas : ninguna (captura codigo y unidades)
+; Salidas  : suma unidades sin exceder 100; si se rechaza no cambia nada
+; Modifica : ninguno
+; Conserva : EAX, EBX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+RecibirMercancia PROC USES eax ebx edx esi
+    call CapturarYBuscarProducto
+    cmp eax, -1
+    je rmFin
+    mov indiceActual, eax
+    mov edx, OFFSET msgPedirCantEntrada
+    call PedirCantidadPositiva
+    cmp ebx, 1
+    jne rmFin
+    mov esi, indiceActual
+    shl esi, 2
+    mov ebx, existencias[esi]
+    add ebx, eax                ; maximo 100 + 999,999,999: no desborda
+    cmp ebx, EXISTENCIA_MAX
+    jbe rmAceptar
+    mEscribirLinea msgExcede100
+    jmp rmFin
+rmAceptar:
+    mov existencias[esi], ebx
+    mov sinGuardar, 1
+    mEscribirLinea msgRecibido
+rmFin:
+    ret
+RecibirMercancia ENDP
+
+; ------------------------------------------------------------
+; VenderProducto  (opcion 5)
+; Entradas : ninguna (captura codigo y unidades)
+; Salidas  : descuenta existencias, suma ingresos y muestra el
+;            desglose; si se rechaza no cambia nada
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+VenderProducto PROC USES eax ebx ecx edx esi
+    call CapturarYBuscarProducto
+    cmp eax, -1
+    je vpFin
+    mov indiceActual, eax
+    mov edx, OFFSET msgPedirCantVenta
+    call PedirCantidadPositiva
+    cmp ebx, 1
+    jne vpFin
+    mov cantidadActual, eax
+    mov esi, indiceActual
+    shl esi, 2
+    cmp eax, existencias[esi]
+    jbe vpCalcular
+    mEscribirLinea msgSinExistencias
+    jmp vpFin
+vpCalcular:
+    mov ebx, eax
+    mov eax, precios[esi]
+    call CalcularVenta
+    cmp edx, 0
+    jne vpDesborde
+    mov edx, ingresosSesion
+    add edx, ecx
+    jc vpDesborde               ; los ingresos acumulados no caben en 32 bits
+    mov ingresosSesion, edx
+    mov esi, indiceActual
+    shl esi, 2
+    mov edx, existencias[esi]
+    sub edx, cantidadActual
+    mov existencias[esi], edx
+    mov sinGuardar, 1
+    call MostrarDesglose
+    mEscribirLinea msgVentaOk
+    jmp vpFin
+vpDesborde:
+    mEscribirLinea msgDesborde
+vpFin:
+    ret
+VenderProducto ENDP
+
+; ------------------------------------------------------------
+; SimularDescuento  (opcion 9, demostracion de la regla)
+; Entradas : ninguna (captura codigo y unidades)
+; Salidas  : muestra el desglose sin modificar inventario ni ingresos
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+SimularDescuento PROC USES eax ebx ecx edx esi
+    call CapturarYBuscarProducto
+    cmp eax, -1
+    je sdFin
+    mov indiceActual, eax
+    mov edx, OFFSET msgPedirCantSim
+    call PedirCantidadPositiva
+    cmp ebx, 1
+    jne sdFin
+    mov ebx, eax
+    mov esi, indiceActual
+    shl esi, 2
+    mov eax, precios[esi]
+    call CalcularVenta
+    cmp edx, 0
+    je sdMostrar
+    mEscribirLinea msgDesborde
+    jmp sdFin
+sdMostrar:
+    call MostrarDesglose
+sdFin:
+    ret
+SimularDescuento ENDP
+
+; ------------------------------------------------------------
+; MostrarResumen  (opcion 6)
+; Entradas : ninguna
+; Salidas  : unidades disponibles, valor del inventario e ingresos
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, ESI (con USES)
+; ------------------------------------------------------------
+MostrarResumen PROC USES eax ebx ecx edx esi
+    mov valorTotal, 0
+    mov ebx, 0                  ; unidades disponibles
+    mov esi, 0                  ; desplazamiento en los arreglos DWORD
+    mov ecx, cantidadProductos
+    cmp ecx, 0
+    je mrImprimir
+mrBucle:
+    mov eax, existencias[esi]
+    add ebx, eax
+    mov edx, precios[esi]
+    mul edx                     ; EDX:EAX = existencia * precio
+    cmp edx, 0
+    jne mrDesborde
+    mov edx, valorTotal
+    add edx, eax
+    jc mrDesborde
+    mov valorTotal, edx
+    add esi, 4
+    loop mrBucle
+mrImprimir:
+    mEscribirLinea msgResumenTitulo
+    mEscribir msgResProductos
+    mov eax, cantidadProductos
+    call MostrarNumero
+    call Crlf
+    mEscribir msgResUnidades
+    mov eax, ebx
+    call MostrarNumero
+    call Crlf
+    mEscribir msgResValor
+    mov eax, valorTotal
+    call MostrarImporte
+    call Crlf
+    mEscribir msgResIngresos
+    mov eax, ingresosSesion
+    call MostrarImporte
+    call Crlf
+    jmp mrFin
+mrDesborde:
+    mEscribirLinea msgDesborde
+mrFin:
+    ret
+MostrarResumen ENDP
+
+; ============================================================
+;  ARCHIVOS
+; ============================================================
+
+; ------------------------------------------------------------
+; EscribirBloque
+; Entradas : EDX = buffer, ECX = bytes; usa 'archivoHandle'
+; Salidas  : EBX = 1 si se escribieron todos los bytes, 0 si hubo error
+; Modifica : EBX
+; Conserva : EAX, ECX, EDX (con USES)
+; ------------------------------------------------------------
+EscribirBloque PROC USES eax ecx edx
+    mov bytesPedidos, ecx
+    mov eax, archivoHandle
+    call WriteToFile
+    jc ebError
+    cmp eax, bytesPedidos
+    jne ebError
+    mov ebx, 1
+    jmp ebSalir
+ebError:
+    mov ebx, 0
+ebSalir:
+    ret
+EscribirBloque ENDP
+
+; ------------------------------------------------------------
+; LeerBloque
+; Entradas : EDX = buffer, ECX = bytes; usa 'archivoHandle'
+; Salidas  : EBX = 1 si se leyeron todos los bytes, 0 si hubo error
+; Modifica : EBX
+; Conserva : EAX, ECX, EDX (con USES)
+; ------------------------------------------------------------
+LeerBloque PROC USES eax ecx edx
+    mov bytesPedidos, ecx
+    mov eax, archivoHandle
+    call ReadFromFile
+    jc lbError
+    cmp eax, bytesPedidos
+    jne lbError
+    mov ebx, 1
+    jmp lbSalir
+lbError:
+    mov ebx, 0
+lbSalir:
+    ret
+LeerBloque ENDP
+
+; ------------------------------------------------------------
+; GuardarCatalogo  (opcion 7)
+; Entradas : ninguna
+; Salidas  : escribe Catalogo_Cubos.dat y limpia 'sinGuardar' si todo salio bien
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX (con USES)
+; ------------------------------------------------------------
+GuardarCatalogo PROC USES eax ebx ecx edx
+    mov edx, OFFSET nombreArchivo
+    call CreateOutputFile
+    cmp eax, INVALID_HANDLE_VALUE
+    je gcError
+    mov archivoHandle, eax
+
+    mEscribirArchivo cantidadProductos, 4, gcErrorEscritura
+    mEscribirArchivo codigos, BYTES_CODIGOS, gcErrorEscritura
+    mEscribirArchivo nombres, BYTES_NOMBRES, gcErrorEscritura
+    mEscribirArchivo precios, BYTES_ENTEROS, gcErrorEscritura
+    mEscribirArchivo existencias, BYTES_ENTEROS, gcErrorEscritura
+
+    mov eax, archivoHandle
+    call CloseFile
+    test eax, eax
+    jz gcError
+    mov sinGuardar, 0
+    mEscribirLinea msgGuardadoOk
+    jmp gcFin
+
+gcErrorEscritura:
+    mov eax, archivoHandle
+    call CloseFile
+gcError:
+    mEscribirLinea msgGuardadoError
+gcFin:
+    ret
+GuardarCatalogo ENDP
+
+; ------------------------------------------------------------
+; ValidarCatalogoTemporal
+; Entradas : datos leidos en tmpCantidad, tmpCodigos, tmpNombres,
+;            tmpPrecios y tmpExistencias
+; Salidas  : EAX = 1 si los datos cumplen todos los limites, 0 si no
+; Modifica : EAX
+; Conserva : EBX, ECX, ESI (con USES)
+; ------------------------------------------------------------
+ValidarCatalogoTemporal PROC USES ebx ecx esi
+    cmp tmpCantidad, MAX_PRODUCTOS
+    ja vcInvalido
+    mov ecx, tmpCantidad
+    cmp ecx, 0
+    je vcValido
+    mov ebx, 0
+vcProducto:
+    imul esi, ebx, TAM_CODIGO
+    add esi, OFFSET tmpCodigos
+    call ValidarFormatoCodigo
+    cmp eax, 1
+    jne vcInvalido
+    imul esi, ebx, TAM_NOMBRE
+    add esi, OFFSET tmpNombres
+    cmp BYTE PTR [esi], 0
+    je vcInvalido
+    add esi, MAX_LONG_NOMBRE
+    cmp BYTE PTR [esi], 0
+    jne vcInvalido
+    mov esi, ebx
+    shl esi, 2
+    mov eax, tmpPrecios[esi]
+    mVerificarRango eax, PRECIO_MIN, PRECIO_MAX, vcInvalido
+    mov eax, tmpExistencias[esi]
+    cmp eax, EXISTENCIA_MAX
+    ja vcInvalido
+    inc ebx
+    loop vcProducto
+vcValido:
+    mov eax, 1
+    jmp vcSalir
+vcInvalido:
+    mov eax, 0
+vcSalir:
+    ret
+ValidarCatalogoTemporal ENDP
+
+; ------------------------------------------------------------
+; CargarCatalogo  (opcion 8)
+; Entradas : ninguna
+; Salidas  : reemplaza el catalogo solo si el archivo se leyo completo
+;            y todos sus datos son validos; si no, conserva el actual
+; Modifica : ninguno
+; Conserva : EAX, EBX, ECX, EDX, ESI, EDI (con USES)
+; ------------------------------------------------------------
+CargarCatalogo PROC USES eax ebx ecx edx esi edi
+    cmp sinGuardar, 0
+    je ldAbrir
+    mov edx, OFFSET msgConfCargar
+    call Confirmar
+    cmp eax, 1
+    jne ldFin
+ldAbrir:
+    mov edx, OFFSET nombreArchivo
+    call OpenInputFile
+    cmp eax, INVALID_HANDLE_VALUE
+    je ldNoArchivo
+    mov archivoHandle, eax
+
+    mLeerArchivo tmpCantidad, 4, ldErrorLectura
+    mLeerArchivo tmpCodigos, BYTES_CODIGOS, ldErrorLectura
+    mLeerArchivo tmpNombres, BYTES_NOMBRES, ldErrorLectura
+    mLeerArchivo tmpPrecios, BYTES_ENTEROS, ldErrorLectura
+    mLeerArchivo tmpExistencias, BYTES_ENTEROS, ldErrorLectura
+
+    mov eax, archivoHandle
+    call CloseFile
+
+    call ValidarCatalogoTemporal
+    cmp eax, 1
+    jne ldInvalido
+
+    mov eax, tmpCantidad
+    mov cantidadProductos, eax
+    mCopiarArreglo tmpCodigos, codigos, BYTES_CODIGOS
+    mCopiarArreglo tmpNombres, nombres, BYTES_NOMBRES
+    mCopiarArreglo tmpPrecios, precios, BYTES_ENTEROS
+    mCopiarArreglo tmpExistencias, existencias, BYTES_ENTEROS
+    mov sinGuardar, 0
+    mEscribirLinea msgCargadoOk
+    jmp ldFin
+
+ldInvalido:
+    mEscribirLinea msgCargaInvalida
+    jmp ldFin
+ldErrorLectura:
+    mov eax, archivoHandle
+    call CloseFile
+    mEscribirLinea msgCargaLectura
+    jmp ldFin
+ldNoArchivo:
+    mEscribirLinea msgCargaNoArchivo
+ldFin:
+    ret
+CargarCatalogo ENDP
+
+END main
